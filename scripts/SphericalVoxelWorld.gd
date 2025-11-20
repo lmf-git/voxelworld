@@ -16,7 +16,7 @@ signal mesh_update_completed(terrain_triangles: int, water_triangles: int)
 #region Exported Properties
 @export_group("Planet Configuration")
 @export_range(10.0, 200.0, 1.0) var planet_radius: float = 50.0
-@export_range(16, 128, 1) var voxel_resolution: int = 64
+@export_range(16, 256, 1) var voxel_resolution: int = 96
 @export_range(0.0, 0.2, 0.01) var water_level: float = 0.02
 
 @export_group("Noise Seeds")
@@ -29,8 +29,9 @@ signal mesh_update_completed(terrain_triangles: int, water_triangles: int)
 @export_range(0.0, 2.0, 0.01) var continent_strength: float = 0.35
 @export_range(0.0, 2.0, 0.01) var mountain_strength: float = 0.45
 @export_range(0.0, 1.0, 0.01) var cave_threshold: float = 0.15
-@export_range(0.0, 0.5, 0.01) var cave_min_depth: float = 0.1
+@export_range(0.0, 0.5, 0.01) var cave_min_depth: float = 0.25
 @export_range(0.0, 1.0, 0.01) var river_threshold: float = 0.1
+@export var enable_caves: bool = false
 
 @export_group("Performance")
 @export var use_threading: bool = true
@@ -284,8 +285,9 @@ func _generate_voxel_density(x: int, y: int, z: int) -> void:
 	density += continent_noise * planet_radius * continent_strength
 	density += mountain_noise_val * mountain_factor * planet_radius * mountain_strength
 
-	# Cave generation
-	density = _apply_caves(nx, ny, nz, density)
+	# Cave generation (optional - disabled by default to prevent floating geometry)
+	if enable_caves:
+		density = _apply_caves(nx, ny, nz, density)
 
 	# River valleys
 	density = _apply_rivers(nx, ny, nz, continent_noise, density)

@@ -80,17 +80,25 @@ The terrain uses multiple layers of 3D simplex noise:
 4. **River Noise**: Flow patterns for river valley carving
 
 ### Voxel System
-- **Resolution**: 64³ voxels by default
+- **Resolution**: 96³ voxels by default (configurable 16-256)
 - **Planet Radius**: 50 units
 - **Dynamic Density Field**: Signed distance field with marching cubes surface extraction
 - **Water Representation**: Negative density values for water voxels
+- **LOD**: Not currently implemented - see [LOD_IMPLEMENTATION.md](LOD_IMPLEMENTATION.md) for details
 
 ### Performance
-- Generates approximately **50,000-150,000 triangles** for terrain rendering
+- Generates approximately **100,000-300,000 triangles** at 96³ resolution
 - **Threaded terrain generation** keeps UI responsive
 - Mesh generation occurs on-demand when terrain is modified
 - **Static typing** provides 20-40% performance improvement
 - **Packed arrays** for efficient vertex data storage
+- Generation time: 5-15 seconds (depending on resolution and CPU)
+
+**Resolution Impact:**
+- 64³: ~50k-150k triangles, 2-5 sec generation, 60 FPS
+- 96³: ~100k-300k triangles, 5-15 sec generation, 45-60 FPS ⭐ **Recommended**
+- 128³: ~200k-600k triangles, 15-30 sec generation, 30-45 FPS
+- 192³+: 500k+ triangles, 45+ sec generation, <30 FPS (needs LOD)
 
 ## Customization
 
@@ -100,7 +108,11 @@ All parameters are organized in the Inspector with clear groups:
 
 **Planet Configuration:**
 - **planet_radius**: Size of the planet (10-200, default: 50.0)
-- **voxel_resolution**: Number of voxels per axis (16-128, default: 64)
+- **voxel_resolution**: Number of voxels per axis (16-256, default: 96)
+  - 64: Fast generation, lower detail
+  - 96: **Recommended** - good balance
+  - 128: High detail, slower generation
+  - 192+: Very high detail, slow (requires LOD for good FPS)
 - **water_level**: Height of ocean surface (0-0.2, default: 0.02)
 
 **Noise Seeds:**
@@ -113,8 +125,9 @@ All parameters are organized in the Inspector with clear groups:
 - **continent_strength**: Landmass height (0-2, default: 0.35)
 - **mountain_strength**: Peak height (0-2, default: 0.45)
 - **cave_threshold**: Cave density (0-1, default: 0.15)
-- **cave_min_depth**: Minimum depth for caves (0-0.5, default: 0.1) - prevents surface gaps
+- **cave_min_depth**: Minimum depth for caves (0-0.5, default: 0.25)
 - **river_threshold**: River width (0-1, default: 0.1)
+- **enable_caves**: Enable cave generation (default: false) - **Warning**: Can cause floating geometry
 
 **Biome System:**
 The terrain automatically applies height-based biomes:
@@ -161,20 +174,29 @@ See [GODOT_BEST_PRACTICES.md](GODOT_BEST_PRACTICES.md) for detailed explanations
 
 ## Known Limitations
 
-- **Memory Usage**: 64³ resolution uses ~1MB for voxel data, higher resolutions use significantly more
-- **No LOD**: All voxels are rendered at full resolution
-- **No Chunking**: Entire planet is one mesh (not suitable for very large worlds)
+- **Memory Usage**: 96³ uses ~3.5MB voxel data, 128³ uses ~8MB, 256³ uses ~64MB
+- **No LOD**: All voxels rendered at full resolution - see [LOD_IMPLEMENTATION.md](LOD_IMPLEMENTATION.md)
+- **No Chunking**: Entire planet is one mesh (limits max resolution without LOD)
+- **Caves Disabled**: Cave generation can create floating geometry artifacts (enable at your own risk)
 
 ## Future Enhancements
 
-- Chunk-based loading for larger planets
-- Multithreaded mesh generation
+**High Priority:**
+- **LOD System**: Distance-based detail levels (see [LOD_IMPLEMENTATION.md](LOD_IMPLEMENTATION.md))
+- **Chunk System**: Split world into manageable pieces
+- **Fix Cave Artifacts**: Better algorithm for underground caves without surface gaps
+
+**Medium Priority:**
+- Multithreaded mesh generation (currently only terrain gen is threaded)
 - GPU-based marching cubes for better performance
-- Biome system with varied vegetation
-- Physics-based water flow
+- Enhanced biome system with varied vegetation
+- Physics-based water flow simulation
+
+**Low Priority:**
 - Procedural textures and materials
 - Save/load functionality
 - Multiplayer support
+- Ambient occlusion for caves
 
 ## Credits
 

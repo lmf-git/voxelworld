@@ -9,7 +9,7 @@
 [node name="SphericalVoxelWorld" type="Node3D" parent="."]
 script = ExtResource("1_voxel")
 planet_radius = 50.0
-voxel_resolution = 64
+voxel_resolution = 96
 water_level = 0.02
 terrain_seed = 12345
 cave_seed = 67890
@@ -18,8 +18,9 @@ river_seed = 22222
 continent_strength = 0.35
 mountain_strength = 0.45
 cave_threshold = 0.15
-cave_min_depth = 0.1
+cave_min_depth = 0.25
 river_threshold = 0.1
+enable_caves = false
 use_threading = true
 generate_on_ready = true
 
