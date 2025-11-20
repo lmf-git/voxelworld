@@ -1,4 +1,4 @@
-# Spherical Voxel World
+# Spherical Voxel World - Godot 4.5
 
 A real-time 3D spherical planet generator with volumetric voxel terrain, featuring destructible environments, procedurally generated mountains, caves, rivers, and oceans.
 
@@ -18,8 +18,9 @@ A real-time 3D spherical planet generator with volumetric voxel terrain, featuri
 - **WASD** - Move forward/left/backward/right
 - **Space** - Move up
 - **Ctrl** - Move down
-- **Shift** - Speed boost (hold while moving)
-- **Mouse** - Look around (click to enable pointer lock)
+- **Shift** (hold) - Speed boost while moving
+- **Mouse** - Look around
+- **ESC** - Toggle mouse capture
 
 ### Terrain Modification
 - **Click** - Destroy terrain (remove voxels)
@@ -30,51 +31,93 @@ A real-time 3D spherical planet generator with volumetric voxel terrain, featuri
 - **Remove Terrain** - Remove terrain at camera center
 - **Regenerate** - Generate a new random world
 
-## Running the Project
+## How to Run
 
-### Development Mode
-```bash
-npm run dev
+1. Open the project in **Godot 4.3 or later**
+2. Press **F5** or click the **Play** button
+3. Click in the window to capture the mouse and start exploring
+
+## Project Structure
+
 ```
-
-Then open your browser to the URL shown in the terminal (usually `http://localhost:5173`).
-
-### Build for Production
-```bash
-npm run build
-npm run preview
+voxelworld/
+├── scenes/
+│   └── Main.tscn           # Main scene with world, camera, and UI
+├── scripts/
+│   ├── SimplexNoise.gd     # 3D simplex noise implementation
+│   ├── MarchingCubes.gd    # Marching cubes algorithm
+│   ├── SphericalVoxelWorld.gd  # Core voxel world system
+│   ├── PlayerCamera.gd     # First-person camera controller
+│   └── UI.gd               # User interface controller
+├── project.godot           # Godot project configuration
+└── README.md
 ```
 
 ## Technical Details
 
 ### Architecture
 - **SphericalVoxelWorld**: Core voxel engine with spherical coordinate system
-- **SimplexNoise**: 3D simplex noise implementation for terrain generation
+- **SimplexNoise3D**: 3D simplex noise implementation for terrain generation
 - **MarchingCubes**: Mesh generation algorithm for voxel visualization
-- **Three.js**: 3D rendering engine
+- **PlayerCamera**: First-person controller with terrain interaction
 
 ### Terrain Generation
 The terrain uses multiple layers of 3D simplex noise:
-1. **Continental Noise**: Base landmass formation
-2. **Mountain Noise**: High-frequency detail for peaks and valleys
+1. **Continental Noise**: Base landmass formation (3 octaves)
+2. **Mountain Noise**: High-frequency detail for peaks and valleys (2 octaves)
 3. **Cave Noise**: Dual-threshold noise for organic cave systems
 4. **River Noise**: Flow patterns for river valley carving
 
 ### Voxel System
-- Resolution: 64³ voxels by default
-- Planet radius: 50 units
-- Dynamic density field with marching cubes surface extraction
-- Negative density values represent water
+- **Resolution**: 64³ voxels by default
+- **Planet Radius**: 50 units
+- **Dynamic Density Field**: Signed distance field with marching cubes surface extraction
+- **Water Representation**: Negative density values for water voxels
 
-## Performance
+### Performance
+- Generates approximately **50,000-150,000 triangles** for terrain rendering
+- Mesh generation occurs on-demand when terrain is modified
+- Single-threaded generation (takes a few seconds on startup)
 
-The system generates approximately 50,000-150,000 triangles for terrain rendering, depending on terrain complexity. Mesh generation occurs on-demand when terrain is modified.
+## Customization
+
+You can adjust these parameters in the Main.tscn scene:
+
+### SphericalVoxelWorld Node
+- **planet_radius**: Size of the planet (default: 50.0)
+- **voxel_resolution**: Number of voxels per axis (default: 64, higher = more detail but slower)
+- **water_level**: Height of ocean surface relative to planet radius (default: 0.02)
+
+### PlayerCamera Node
+- **move_speed**: Base movement speed (default: 30.0)
+- **sprint_multiplier**: Speed boost when holding Shift (default: 3.0)
+- **mouse_sensitivity**: Look sensitivity (default: 0.002)
+- **terrain_modification_radius**: Size of terrain edits in voxels (default: 2)
+
+## Known Limitations
+
+- **Generation Time**: Initial terrain generation takes 3-10 seconds depending on CPU
+- **Single Thread**: Mesh generation is not yet multithreaded
+- **Memory Usage**: 64³ resolution uses ~1MB for voxel data, higher resolutions use significantly more
+- **No LOD**: All voxels are rendered at full resolution
 
 ## Future Enhancements
 
 - Chunk-based loading for larger planets
+- Multithreaded mesh generation
+- GPU-based marching cubes for better performance
 - Biome system with varied vegetation
 - Physics-based water flow
+- Procedural textures and materials
+- Save/load functionality
 - Multiplayer support
-- Procedural textures
-- GPU-based marching cubes for better performance
+
+## Credits
+
+Built with Godot Engine 4.5
+Marching Cubes algorithm based on Paul Bourke's tables
+Simplex Noise implementation adapted for GDScript
+
+## License
+
+This project is provided as-is for educational and demonstration purposes.
