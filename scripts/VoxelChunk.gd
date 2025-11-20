@@ -1,3 +1,4 @@
+class_name VoxelChunk
 extends Node3D
 
 ## Individual voxel chunk with LOD support
