@@ -1,11 +1,6 @@
 extends Camera3D
 
 ## First-person camera controller with terrain modification
-## Communicates with voxel world using signals
-
-#region Signals
-signal terrain_modification_requested(add_terrain: bool)
-#endregion
 
 #region Exported Properties
 @export_group("Movement")

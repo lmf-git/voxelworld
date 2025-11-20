@@ -6,7 +6,7 @@ extends Node3D
 
 #region Signals
 signal terrain_generation_started()
-signal terrain_generation_progress(progress: float)
+signal terrain_generation_progress(progress: float) # Used via call_deferred for thread safety
 signal terrain_generation_completed()
 signal terrain_modified(position: Vector3i, radius: int, added: bool)
 signal mesh_update_started()
@@ -245,7 +245,8 @@ func _generate_terrain_data() -> void:
 				voxel_count += 1
 
 				# Emit progress every 5%
-				if voxel_count % (total_voxels / 20) == 0:
+				var progress_interval: int = maxi(1, total_voxels / 20)
+				if voxel_count % progress_interval == 0:
 					var progress: float = float(voxel_count) / float(total_voxels)
 					call_deferred("emit_signal", "terrain_generation_progress", progress)
 
@@ -283,10 +284,10 @@ func _generate_voxel_density(x: int, y: int, z: int) -> void:
 	density += mountain_noise_val * mountain_factor * planet_radius * mountain_strength
 
 	# Cave generation
-	_apply_caves(nx, ny, nz, density)
+	density = _apply_caves(nx, ny, nz, density)
 
 	# River valleys
-	_apply_rivers(nx, ny, nz, continent_noise, density)
+	density = _apply_rivers(nx, ny, nz, continent_noise, density)
 
 	set_voxel(x, y, z, density)
 
