@@ -326,29 +326,49 @@ func _on_generation_complete() -> void:
 		_generation_thread.wait_to_finish()
 		_generation_thread = null
 
-	# Debug: Sample some voxel values to verify terrain generation
+	# Debug: Sample voxel values and find height range
 	var sample_count: int = 0
 	var positive_density: int = 0
 	var negative_density: int = 0
 	var water_voxels: int = 0
+	var max_height: float = 0.0
+	var min_density: float = 9999.0
+	var max_density: float = -9999.0
 
-	for i in range(100):
+	for i in range(200):
 		var x: int = randi() % voxel_resolution
 		var y: int = randi() % voxel_resolution
 		var z: int = randi() % voxel_resolution
 		var density: float = get_voxel(x, y, z)
+		var world_pos: Vector3 = voxel_to_world(x, y, z)
+		var height: float = world_pos.length()
+
 		sample_count += 1
 		if density > 0:
 			positive_density += 1
+			max_height = maxf(max_height, height)
 		else:
 			negative_density += 1
 		if density < 0 and density > -50:
 			water_voxels += 1
 
-	print("Terrain generated! Stats:")
+		max_density = maxf(max_density, density)
+		min_density = minf(min_density, density)
+
+	var water_radius: float = planet_radius * (BASE_RADIUS_MULTIPLIER + water_level)
+
+	print("=== Terrain Generation Complete ===")
 	print("  Positive density: ", positive_density, "/", sample_count)
 	print("  Negative density: ", negative_density, "/", sample_count)
 	print("  Water voxels: ", water_voxels, "/", sample_count)
+	print("  Density range: ", min_density, " to ", max_density)
+	print("  Max terrain height: ", max_height)
+	print("  Water level: ", water_radius)
+	print("  Base radius: ", planet_radius * BASE_RADIUS_MULTIPLIER)
+	if max_height > water_radius:
+		print("  ✓ Land exists above water!")
+	else:
+		print("  ✗ WARNING: No land above water level!")
 	print("  Creating meshes...")
 
 	_update_meshes()
@@ -365,21 +385,17 @@ func _update_meshes() -> void:
 	mesh_update_started.emit()
 
 	var terrain_data: Dictionary = _generate_terrain_mesh()
-	var water_data: Dictionary = _generate_water_mesh()
 
-	# Update terrain mesh
+	# Update terrain mesh (includes water-colored areas)
 	if terrain_data.vertices.size() > 0:
 		var terrain_mesh: ArrayMesh = _create_mesh_from_data(terrain_data.vertices, terrain_data.colors)
 		_terrain_mesh_instance.mesh = terrain_mesh
 
-	# Update water mesh
-	if water_data.vertices.size() > 0:
-		var water_mesh: ArrayMesh = _create_mesh_from_data(water_data.vertices, water_data.colors)
-		_water_mesh_instance.mesh = water_mesh
+	# Hide water mesh (not used - water is shown via terrain vertex colors)
+	_water_mesh_instance.mesh = null
 
 	var terrain_tris: int = terrain_data.vertices.size() / 3
-	var water_tris: int = water_data.vertices.size() / 3
-	mesh_update_completed.emit(terrain_tris, water_tris)
+	mesh_update_completed.emit(terrain_tris, 0)
 
 func _generate_terrain_mesh() -> Dictionary:
 	var vertices: PackedVector3Array = []
@@ -474,14 +490,18 @@ func _get_terrain_color(vert: Vector3, cube_values: Array[float]) -> Color:
 
 	# Normalize height relative to water level
 	var height_above_water: float = (height - water_radius) / (planet_radius * 0.15)
-	var normalized_height: float = (height - base_radius) / (planet_radius * 0.3)
 
-	# Check if this is water voxels (negative density)
-	for val in cube_values:
-		if val < 0.0 and val > -50.0:
-			return Color(0.1, 0.3, 0.8)  # Water blue
+	# Check if this is underwater (based on height, not density)
+	# Water level is at water_radius
+	if height < water_radius:
+		# Below water - show underwater colors
+		var depth: float = (water_radius - height) / (planet_radius * 0.05)
+		if depth > 0.5:
+			return Color(0.05, 0.1, 0.3)  # Deep water - dark blue
+		else:
+			return Color(0.1, 0.3, 0.6)  # Shallow water - medium blue
 
-	# Biome colors based on height
+	# Above water - show terrain biomes based on height
 	if height_above_water > 0.8:
 		# High peaks - Snow
 		return Color(0.95, 0.95, 1.0)
