@@ -26,8 +26,8 @@ signal mesh_update_completed(terrain_triangles: int, water_triangles: int)
 @export var river_seed: int = 22222
 
 @export_group("Terrain Parameters")
-@export_range(0.0, 1.0, 0.01) var continent_strength: float = 0.15
-@export_range(0.0, 1.0, 0.01) var mountain_strength: float = 0.25
+@export_range(0.0, 2.0, 0.01) var continent_strength: float = 0.35
+@export_range(0.0, 2.0, 0.01) var mountain_strength: float = 0.45
 @export_range(0.0, 1.0, 0.01) var cave_threshold: float = 0.15
 @export_range(0.0, 1.0, 0.01) var river_threshold: float = 0.1
 
@@ -326,7 +326,31 @@ func _on_generation_complete() -> void:
 		_generation_thread.wait_to_finish()
 		_generation_thread = null
 
-	print("Terrain generated, creating meshes...")
+	# Debug: Sample some voxel values to verify terrain generation
+	var sample_count: int = 0
+	var positive_density: int = 0
+	var negative_density: int = 0
+	var water_voxels: int = 0
+
+	for i in range(100):
+		var x: int = randi() % voxel_resolution
+		var y: int = randi() % voxel_resolution
+		var z: int = randi() % voxel_resolution
+		var density: float = get_voxel(x, y, z)
+		sample_count += 1
+		if density > 0:
+			positive_density += 1
+		else:
+			negative_density += 1
+		if density < 0 and density > -50:
+			water_voxels += 1
+
+	print("Terrain generated! Stats:")
+	print("  Positive density: ", positive_density, "/", sample_count)
+	print("  Negative density: ", negative_density, "/", sample_count)
+	print("  Water voxels: ", water_voxels, "/", sample_count)
+	print("  Creating meshes...")
+
 	_update_meshes()
 	_is_generating = false
 	terrain_generation_completed.emit()
@@ -441,26 +465,45 @@ func _has_water(values: Array[float]) -> bool:
 			return true
 	return false
 
+## Generate terrain color based on height above water level (biomes)
+## Returns appropriate color for snow, mountains, grass, beaches, etc.
 func _get_terrain_color(vert: Vector3, cube_values: Array[float]) -> Color:
 	var height: float = vert.length()
-	var normalized_height: float = (height - planet_radius * 0.7) / (planet_radius * 0.3)
+	var base_radius: float = planet_radius * BASE_RADIUS_MULTIPLIER
+	var water_radius: float = planet_radius * (BASE_RADIUS_MULTIPLIER + water_level)
 
-	# Check if water
+	# Normalize height relative to water level
+	var height_above_water: float = (height - water_radius) / (planet_radius * 0.15)
+	var normalized_height: float = (height - base_radius) / (planet_radius * 0.3)
+
+	# Check if this is water voxels (negative density)
 	for val in cube_values:
 		if val < 0.0 and val > -50.0:
-			return Color(0.1, 0.3, 0.8)
+			return Color(0.1, 0.3, 0.8)  # Water blue
 
-	# Height-based coloring
-	if normalized_height > 0.7:
-		return Color(0.95, 0.95, 1.0)  # Snow
-	elif normalized_height > 0.5:
-		return Color(0.5, 0.5, 0.5)  # Rocky mountains
-	elif normalized_height > 0.2:
-		return Color(0.2, 0.6, 0.2)  # Grass
-	elif normalized_height > 0.0:
-		return Color(0.76, 0.7, 0.5)  # Beach/dirt
+	# Biome colors based on height
+	if height_above_water > 0.8:
+		# High peaks - Snow
+		return Color(0.95, 0.95, 1.0)
+	elif height_above_water > 0.5:
+		# Mountains - Rocky gray with some variation
+		var rock_variation: float = sin(vert.x * 10.0 + vert.y * 10.0) * 0.1
+		return Color(0.5 + rock_variation, 0.5 + rock_variation, 0.5 + rock_variation)
+	elif height_above_water > 0.3:
+		# Hills - Dark green grass
+		return Color(0.2, 0.5, 0.2)
+	elif height_above_water > 0.1:
+		# Lowlands - Bright green grass
+		return Color(0.3, 0.7, 0.3)
+	elif height_above_water > -0.05:
+		# Beach/sand
+		return Color(0.85, 0.8, 0.6)
+	elif height_above_water > -0.15:
+		# Shallow water / mud
+		return Color(0.6, 0.55, 0.4)
 	else:
-		return Color(0.3, 0.4, 0.3)  # Ocean floor
+		# Ocean floor / deep areas
+		return Color(0.3, 0.4, 0.3)
 
 func _create_mesh_from_data(vertices: PackedVector3Array, colors: PackedColorArray) -> ArrayMesh:
 	var arrays: Array = []

@@ -9,6 +9,7 @@ A real-time 3D spherical planet generator with volumetric voxel terrain, featuri
 ### Terrain Features
 - **Spherical Planet**: Fully volumetric spherical world using voxel-based terrain
 - **Procedural Generation**: Multi-octave 3D simplex noise for realistic terrain
+- **Height-Based Biomes**: Automatic biome coloring (snow peaks, rocky mountains, grasslands, beaches, ocean floor)
 - **Mountains**: Elevated terrain with snow-capped peaks
 - **Caves**: Organic 3D cave systems throughout the planet
 - **Water System**: Oceans, rivers, and dynamic water rendering
@@ -109,10 +110,20 @@ All parameters are organized in the Inspector with clear groups:
 - **river_seed**: Seed for river noise (default: 22222)
 
 **Terrain Parameters:**
-- **continent_strength**: Landmass height (0-1, default: 0.15)
-- **mountain_strength**: Peak height (0-1, default: 0.25)
+- **continent_strength**: Landmass height (0-2, default: 0.35)
+- **mountain_strength**: Peak height (0-2, default: 0.45)
 - **cave_threshold**: Cave density (0-1, default: 0.15)
 - **river_threshold**: River width (0-1, default: 0.1)
+
+**Biome System:**
+The terrain automatically applies height-based biomes:
+- **Snow** (>0.8): White peaks on highest mountains
+- **Rocky Mountains** (0.5-0.8): Gray stone with subtle variation
+- **Dark Grass Hills** (0.3-0.5): Green hills
+- **Bright Grass** (0.1-0.3): Vibrant green lowlands
+- **Beaches** (-0.05-0.1): Sandy shores
+- **Shallow Water** (-0.15 to -0.05): Muddy shallows
+- **Ocean Floor** (<-0.15): Dark green depths
 
 **Performance:**
 - **use_threading**: Enable threaded generation (default: true)
