@@ -2,352 +2,477 @@ class_name SphericalVoxelWorld
 extends Node3D
 
 ## Spherical voxel world with destructible terrain, caves, mountains, rivers and oceans
+## Uses threaded generation for better performance
 
-@export var planet_radius: float = 50.0
-@export var voxel_resolution: int = 64
-@export var water_level: float = 0.02
+#region Signals
+signal terrain_generation_started()
+signal terrain_generation_progress(progress: float)
+signal terrain_generation_completed()
+signal terrain_modified(position: Vector3i, radius: int, added: bool)
+signal mesh_update_started()
+signal mesh_update_completed(terrain_triangles: int, water_triangles: int)
+#endregion
 
-var voxel_size: float
-var voxels: PackedFloat32Array
-var marching_cubes: MarchingCubes
-var terrain_noise: SimplexNoise3D
-var cave_noise: SimplexNoise3D
-var mountain_noise: SimplexNoise3D
-var river_noise: SimplexNoise3D
+#region Exported Properties
+@export_group("Planet Configuration")
+@export_range(10.0, 200.0, 1.0) var planet_radius: float = 50.0
+@export_range(16, 128, 1) var voxel_resolution: int = 64
+@export_range(0.0, 0.2, 0.01) var water_level: float = 0.02
 
-var terrain_mesh_instance: MeshInstance3D
-var water_mesh_instance: MeshInstance3D
+@export_group("Noise Seeds")
+@export var terrain_seed: int = 12345
+@export var cave_seed: int = 67890
+@export var mountain_seed: int = 11111
+@export var river_seed: int = 22222
 
+@export_group("Terrain Parameters")
+@export_range(0.0, 1.0, 0.01) var continent_strength: float = 0.15
+@export_range(0.0, 1.0, 0.01) var mountain_strength: float = 0.25
+@export_range(0.0, 1.0, 0.01) var cave_threshold: float = 0.15
+@export_range(0.0, 1.0, 0.01) var river_threshold: float = 0.1
+
+@export_group("Performance")
+@export var use_threading: bool = true
+@export var generate_on_ready: bool = true
+#endregion
+
+#region Private Variables
+var _voxel_size: float
+var _voxels: PackedFloat32Array
+var _marching_cubes: MarchingCubes
+var _terrain_noise: SimplexNoise3D
+var _cave_noise: SimplexNoise3D
+var _mountain_noise: SimplexNoise3D
+var _river_noise: SimplexNoise3D
+
+var _terrain_mesh_instance: MeshInstance3D
+var _water_mesh_instance: MeshInstance3D
+var _terrain_material: StandardMaterial3D
+var _water_material: StandardMaterial3D
+
+var _is_generating: bool = false
+var _generation_thread: Thread
+#endregion
+
+#region Constants
+const BASE_RADIUS_MULTIPLIER: float = 0.85
+const WATER_DENSITY_MARKER: float = -10.0
+const CONTINENT_SCALE: float = 2.0
+const MOUNTAIN_SCALE: float = 4.0
+const CAVE_SCALE: float = 6.0
+const RIVER_SCALE: float = 3.0
+#endregion
+
+#region Lifecycle Methods
 func _ready() -> void:
-	voxel_size = (planet_radius * 2.0) / float(voxel_resolution)
+	_initialize()
+
+	if generate_on_ready:
+		generate_terrain()
+
+func _exit_tree() -> void:
+	_cleanup()
+#endregion
+
+#region Initialization
+func _initialize() -> void:
+	_voxel_size = (planet_radius * 2.0) / float(voxel_resolution)
 
 	# Initialize voxel array
-	voxels = PackedFloat32Array()
-	voxels.resize(voxel_resolution * voxel_resolution * voxel_resolution)
+	_voxels = PackedFloat32Array()
+	var total_voxels: int = voxel_resolution * voxel_resolution * voxel_resolution
+	_voxels.resize(total_voxels)
+	_voxels.fill(0.0)
 
 	# Initialize noise generators
-	terrain_noise = SimplexNoise3D.new(12345)
-	cave_noise = SimplexNoise3D.new(67890)
-	mountain_noise = SimplexNoise3D.new(11111)
-	river_noise = SimplexNoise3D.new(22222)
+	_terrain_noise = SimplexNoise3D.new(terrain_seed)
+	_cave_noise = SimplexNoise3D.new(cave_seed)
+	_mountain_noise = SimplexNoise3D.new(mountain_seed)
+	_river_noise = SimplexNoise3D.new(river_seed)
 
 	# Initialize marching cubes
-	marching_cubes = MarchingCubes.new()
+	_marching_cubes = MarchingCubes.new()
+
+	# Create materials
+	_create_materials()
 
 	# Create mesh instances
-	terrain_mesh_instance = MeshInstance3D.new()
-	add_child(terrain_mesh_instance)
+	_terrain_mesh_instance = MeshInstance3D.new()
+	_terrain_mesh_instance.name = "TerrainMesh"
+	_terrain_mesh_instance.material_override = _terrain_material
+	add_child(_terrain_mesh_instance)
 
-	water_mesh_instance = MeshInstance3D.new()
-	add_child(water_mesh_instance)
+	_water_mesh_instance = MeshInstance3D.new()
+	_water_mesh_instance.name = "WaterMesh"
+	_water_mesh_instance.material_override = _water_material
+	add_child(_water_mesh_instance)
 
-	# Generate terrain
-	print("Generating terrain...")
-	generate_terrain()
-	print("Generating meshes...")
-	update_meshes()
-	print("World generated!")
+func _create_materials() -> void:
+	# Terrain material
+	_terrain_material = StandardMaterial3D.new()
+	_terrain_material.vertex_color_use_as_albedo = true
+	_terrain_material.roughness = 0.8
+	_terrain_material.metallic = 0.2
+	_terrain_material.cull_mode = BaseMaterial3D.CULL_BACK
 
-func get_voxel_index(x: int, y: int, z: int) -> int:
-	if x < 0 or x >= voxel_resolution or y < 0 or y >= voxel_resolution or z < 0 or z >= voxel_resolution:
-		return -1
-	return x + y * voxel_resolution + z * voxel_resolution * voxel_resolution
+	# Water material
+	_water_material = StandardMaterial3D.new()
+	_water_material.albedo_color = Color(0.0, 0.4, 0.9, 0.7)
+	_water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_water_material.roughness = 0.1
+	_water_material.metallic = 0.3
+	_water_material.cull_mode = BaseMaterial3D.CULL_BACK
 
-func get_voxel(x: int, y: int, z: int) -> float:
-	var idx := get_voxel_index(x, y, z)
-	return voxels[idx] if idx >= 0 else 0.0
+func _cleanup() -> void:
+	if _generation_thread and _generation_thread.is_alive():
+		_generation_thread.wait_to_finish()
 
-func set_voxel(x: int, y: int, z: int, value: float) -> void:
-	var idx := get_voxel_index(x, y, z)
-	if idx >= 0:
-		voxels[idx] = value
+	_voxels.clear()
+#endregion
 
-func world_to_voxel(world_pos: Vector3) -> Vector3i:
-	var offset := planet_radius
-	return Vector3i(
-		int(floor((world_pos.x + offset) / voxel_size)),
-		int(floor((world_pos.y + offset) / voxel_size)),
-		int(floor((world_pos.z + offset) / voxel_size))
-	)
-
-func voxel_to_world(vx: int, vy: int, vz: int) -> Vector3:
-	var offset := planet_radius
-	return Vector3(
-		float(vx) * voxel_size - offset,
-		float(vy) * voxel_size - offset,
-		float(vz) * voxel_size - offset
-	)
-
+#region Public API
 func generate_terrain() -> void:
-	for x in range(voxel_resolution):
-		for y in range(voxel_resolution):
-			for z in range(voxel_resolution):
-				var world_pos := voxel_to_world(x, y, z)
-				var distance_from_center := world_pos.length()
+	if _is_generating:
+		push_warning("Terrain generation already in progress")
+		return
 
-				# Normalize position for noise sampling
-				var nx := world_pos.x / planet_radius
-				var ny := world_pos.y / planet_radius
-				var nz := world_pos.z / planet_radius
+	_is_generating = true
+	terrain_generation_started.emit()
+	print("Generating terrain...")
 
-				# Base spherical shape
-				var base_radius := planet_radius * 0.85
-				var density := base_radius - distance_from_center
+	if use_threading:
+		_generation_thread = Thread.new()
+		_generation_thread.start(_generate_terrain_threaded)
+	else:
+		_generate_terrain_data()
+		_on_generation_complete()
 
-				# Add continents with multiple octaves of noise
-				var continent_scale := 2.0
-				var continent_noise := (
-					terrain_noise.noise(nx * continent_scale, ny * continent_scale, nz * continent_scale) * 0.5 +
-					terrain_noise.noise(nx * continent_scale * 2.0, ny * continent_scale * 2.0, nz * continent_scale * 2.0) * 0.25 +
-					terrain_noise.noise(nx * continent_scale * 4.0, ny * continent_scale * 4.0, nz * continent_scale * 4.0) * 0.125
-				)
+func regenerate() -> void:
+	generate_terrain()
 
-				# Mountains - higher frequency, larger amplitude
-				var mountain_scale := 4.0
-				var mountain_noise_val := (
-					mountain_noise.noise(nx * mountain_scale, ny * mountain_scale, nz * mountain_scale) * 0.6 +
-					mountain_noise.noise(nx * mountain_scale * 2.0, ny * mountain_scale * 2.0, nz * mountain_scale * 2.0) * 0.3
-				)
+func modify_terrain(voxel_pos: Vector3i, radius: int, add_terrain: bool = false) -> void:
+	if _is_generating:
+		return
 
-				# Only add mountains where continents exist
-				var mountain_factor := maxf(0.0, continent_noise) * 1.5
-				density += continent_noise * planet_radius * 0.15
-				density += mountain_noise_val * mountain_factor * planet_radius * 0.25
+	var modification_value: float = 10.0 if add_terrain else -10.0
 
-				# Caves - 3D noise for organic cave systems
-				var cave_scale := 6.0
-				var cave_noise1 := cave_noise.noise(nx * cave_scale, ny * cave_scale, nz * cave_scale)
-				var cave_noise2 := cave_noise.noise(nx * cave_scale + 100.0, ny * cave_scale + 100.0, nz * cave_scale + 100.0)
+	for dx in range(-radius, radius + 1):
+		for dy in range(-radius, radius + 1):
+			for dz in range(-radius, radius + 1):
+				var dist: float = sqrt(float(dx * dx + dy * dy + dz * dz))
+				if dist <= float(radius):
+					var x: int = voxel_pos.x + dx
+					var y: int = voxel_pos.y + dy
+					var z: int = voxel_pos.z + dz
 
-				# Create caves where both noise values are within a threshold
-				var cave_threshold := 0.15
-				if abs(cave_noise1) < cave_threshold and abs(cave_noise2) < cave_threshold:
-					density -= planet_radius * 0.3
+					var current_density: float = get_voxel(x, y, z)
+					set_voxel(x, y, z, current_density + modification_value)
 
-				# River valleys - use noise to create flow patterns
-				var river_scale := 3.0
-				var river_noise_val := river_noise.noise(nx * river_scale, ny * river_scale, nz * river_scale)
-
-				# Create rivers in low-lying areas
-				if continent_noise > -0.1 and continent_noise < 0.3 and abs(river_noise_val) < 0.1:
-					var river_depth := planet_radius * 0.08
-					density -= river_depth
-
-				# Store density value
-				set_voxel(x, y, z, density)
-
-	# Add water layer
-	add_water()
-
-func add_water() -> void:
-	var water_radius := planet_radius * (0.85 + water_level)
-
-	for x in range(voxel_resolution):
-		for y in range(voxel_resolution):
-			for z in range(voxel_resolution):
-				var world_pos := voxel_to_world(x, y, z)
-				var distance_from_center := world_pos.length()
-
-				var current_density := get_voxel(x, y, z)
-
-				# If below water level and empty space, fill with water
-				if distance_from_center < water_radius and current_density < 0.0:
-					set_voxel(x, y, z, -10.0)
-
-func update_meshes() -> void:
-	# Generate terrain mesh
-	var terrain_data := generate_terrain_mesh()
-	if terrain_data.vertices.size() > 0:
-		var terrain_mesh := create_mesh_from_data(terrain_data.vertices, terrain_data.colors)
-		terrain_mesh_instance.mesh = terrain_mesh
-
-		# Create material
-		var material := StandardMaterial3D.new()
-		material.vertex_color_use_as_albedo = true
-		material.roughness = 0.8
-		material.metallic = 0.2
-		terrain_mesh_instance.set_surface_override_material(0, material)
-
-	# Generate water mesh
-	var water_data := generate_water_mesh()
-	if water_data.vertices.size() > 0:
-		var water_mesh := create_mesh_from_data(water_data.vertices, water_data.colors)
-		water_mesh_instance.mesh = water_mesh
-
-		# Create water material
-		var water_material := StandardMaterial3D.new()
-		water_material.albedo_color = Color(0.0, 0.4, 0.9, 0.7)
-		water_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		water_material.roughness = 0.1
-		water_material.metallic = 0.3
-		water_mesh_instance.set_surface_override_material(0, water_material)
-
-func generate_terrain_mesh() -> Dictionary:
-	var vertices: PackedVector3Array = []
-	var colors: PackedColorArray = []
-	var isolevel := 0.0
-
-	for x in range(voxel_resolution - 1):
-		for y in range(voxel_resolution - 1):
-			for z in range(voxel_resolution - 1):
-				var cube_points: Array[Vector3] = [
-					voxel_to_world(x, y, z),
-					voxel_to_world(x + 1, y, z),
-					voxel_to_world(x + 1, y, z + 1),
-					voxel_to_world(x, y, z + 1),
-					voxel_to_world(x, y + 1, z),
-					voxel_to_world(x + 1, y + 1, z),
-					voxel_to_world(x + 1, y + 1, z + 1),
-					voxel_to_world(x, y + 1, z + 1)
-				]
-
-				var cube_values: Array[float] = [
-					get_voxel(x, y, z),
-					get_voxel(x + 1, y, z),
-					get_voxel(x + 1, y, z + 1),
-					get_voxel(x, y, z + 1),
-					get_voxel(x, y + 1, z),
-					get_voxel(x + 1, y + 1, z),
-					get_voxel(x + 1, y + 1, z + 1),
-					get_voxel(x, y + 1, z + 1)
-				]
-
-				var triangles := marching_cubes.polygonise(cube_points, cube_values, isolevel)
-
-				for vert in triangles:
-					vertices.append(vert)
-
-					# Color based on height
-					var height := vert.length()
-					var normalized_height := (height - planet_radius * 0.7) / (planet_radius * 0.3)
-
-					# Check if this is water (negative density)
-					var is_water := false
-					for val in cube_values:
-						if val < 0.0 and val > -50.0:
-							is_water = true
-							break
-
-					var color: Color
-					if is_water:
-						color = Color(0.1, 0.3, 0.8)
-					elif normalized_height > 0.7:
-						color = Color(0.95, 0.95, 1.0)  # Snow
-					elif normalized_height > 0.5:
-						color = Color(0.5, 0.5, 0.5)  # Rocky mountains
-					elif normalized_height > 0.2:
-						color = Color(0.2, 0.6, 0.2)  # Grass
-					elif normalized_height > 0.0:
-						color = Color(0.76, 0.7, 0.5)  # Beach/dirt
-					else:
-						color = Color(0.3, 0.4, 0.3)  # Ocean floor
-
-					colors.append(color)
-
-	return {"vertices": vertices, "colors": colors}
-
-func generate_water_mesh() -> Dictionary:
-	var vertices: PackedVector3Array = []
-	var colors: PackedColorArray = []
-	var isolevel := -5.0
-
-	for x in range(voxel_resolution - 1):
-		for y in range(voxel_resolution - 1):
-			for z in range(voxel_resolution - 1):
-				var cube_points: Array[Vector3] = [
-					voxel_to_world(x, y, z),
-					voxel_to_world(x + 1, y, z),
-					voxel_to_world(x + 1, y, z + 1),
-					voxel_to_world(x, y, z + 1),
-					voxel_to_world(x, y + 1, z),
-					voxel_to_world(x + 1, y + 1, z),
-					voxel_to_world(x + 1, y + 1, z + 1),
-					voxel_to_world(x, y + 1, z + 1)
-				]
-
-				var cube_values: Array[float] = [
-					maxf(-20.0, get_voxel(x, y, z)),
-					maxf(-20.0, get_voxel(x + 1, y, z)),
-					maxf(-20.0, get_voxel(x + 1, y, z + 1)),
-					maxf(-20.0, get_voxel(x, y, z + 1)),
-					maxf(-20.0, get_voxel(x, y + 1, z)),
-					maxf(-20.0, get_voxel(x + 1, y + 1, z)),
-					maxf(-20.0, get_voxel(x + 1, y + 1, z + 1)),
-					maxf(-20.0, get_voxel(x, y + 1, z + 1))
-				]
-
-				# Only process if any voxel is water
-				var has_water := false
-				for val in cube_values:
-					if val < 0.0:
-						has_water = true
-						break
-
-				if has_water:
-					var triangles := marching_cubes.polygonise(cube_points, cube_values, isolevel)
-
-					for vert in triangles:
-						vertices.append(vert)
-						colors.append(Color(0.0, 0.4, 0.9, 0.7))
-
-	return {"vertices": vertices, "colors": colors}
-
-func create_mesh_from_data(vertices: PackedVector3Array, colors: PackedColorArray) -> ArrayMesh:
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_COLOR] = colors
-
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-
-	# Generate normals
-	var st := SurfaceTool.new()
-	st.create_from(mesh, 0)
-	st.generate_normals()
-	return st.commit()
+	terrain_modified.emit(voxel_pos, radius, add_terrain)
+	call_deferred("_update_meshes_deferred")
 
 func raycast_voxel(origin: Vector3, direction: Vector3, max_distance: float = 100.0) -> Dictionary:
-	var step := voxel_size * 0.5
-	var dir := direction.normalized()
+	var step: float = _voxel_size * 0.5
+	var dir: Vector3 = direction.normalized()
+	var steps: int = int(max_distance / step)
 
-	for dist in range(0, int(max_distance / step)):
-		var point := origin + dir * (float(dist) * step)
-		var voxel_pos := world_to_voxel(point)
+	for i in range(steps):
+		var point: Vector3 = origin + dir * (float(i) * step)
+		var voxel_pos: Vector3i = world_to_voxel(point)
 
-		var density := get_voxel(voxel_pos.x, voxel_pos.y, voxel_pos.z)
+		var density: float = get_voxel(voxel_pos.x, voxel_pos.y, voxel_pos.z)
 
 		if density > 0.0:
 			return {
 				"hit": true,
 				"voxel_pos": voxel_pos,
 				"world_pos": point,
-				"distance": float(dist) * step
+				"distance": float(i) * step
 			}
 
 	return {"hit": false}
+#endregion
 
-func modify_terrain(voxel_pos: Vector3i, radius: int, add_terrain: bool = false) -> void:
-	for dx in range(-radius, radius + 1):
-		for dy in range(-radius, radius + 1):
-			for dz in range(-radius, radius + 1):
-				var dist := sqrt(float(dx * dx + dy * dy + dz * dz))
-				if dist <= float(radius):
-					var x := voxel_pos.x + dx
-					var y := voxel_pos.y + dy
-					var z := voxel_pos.z + dz
+#region Voxel Access
+func get_voxel(x: int, y: int, z: int) -> float:
+	var idx: int = _get_voxel_index(x, y, z)
+	return _voxels[idx] if idx >= 0 else 0.0
 
-					var current_density := get_voxel(x, y, z)
+func set_voxel(x: int, y: int, z: int, value: float) -> void:
+	var idx: int = _get_voxel_index(x, y, z)
+	if idx >= 0:
+		_voxels[idx] = value
 
-					if add_terrain:
-						set_voxel(x, y, z, current_density + 10.0)
-					else:
-						set_voxel(x, y, z, current_density - 10.0)
+func _get_voxel_index(x: int, y: int, z: int) -> int:
+	if x < 0 or x >= voxel_resolution or \
+	   y < 0 or y >= voxel_resolution or \
+	   z < 0 or z >= voxel_resolution:
+		return -1
+	return x + y * voxel_resolution + z * voxel_resolution * voxel_resolution
+#endregion
 
-	update_meshes()
+#region Coordinate Conversion
+func world_to_voxel(world_pos: Vector3) -> Vector3i:
+	var offset: float = planet_radius
+	return Vector3i(
+		int(floor((world_pos.x + offset) / _voxel_size)),
+		int(floor((world_pos.y + offset) / _voxel_size)),
+		int(floor((world_pos.z + offset) / _voxel_size))
+	)
 
-func regenerate() -> void:
-	print("Regenerating terrain...")
-	generate_terrain()
-	update_meshes()
-	print("Regeneration complete!")
+func voxel_to_world(vx: int, vy: int, vz: int) -> Vector3:
+	var offset: float = planet_radius
+	return Vector3(
+		float(vx) * _voxel_size - offset,
+		float(vy) * _voxel_size - offset,
+		float(vz) * _voxel_size - offset
+	)
+#endregion
+
+#region Terrain Generation
+func _generate_terrain_threaded() -> void:
+	_generate_terrain_data()
+	call_deferred("_on_generation_complete")
+
+func _generate_terrain_data() -> void:
+	var total_voxels: int = voxel_resolution * voxel_resolution * voxel_resolution
+	var voxel_count: int = 0
+
+	for x in range(voxel_resolution):
+		for y in range(voxel_resolution):
+			for z in range(voxel_resolution):
+				_generate_voxel_density(x, y, z)
+				voxel_count += 1
+
+				# Emit progress every 5%
+				if voxel_count % (total_voxels / 20) == 0:
+					var progress: float = float(voxel_count) / float(total_voxels)
+					call_deferred("emit_signal", "terrain_generation_progress", progress)
+
+	_add_water_layer()
+
+func _generate_voxel_density(x: int, y: int, z: int) -> void:
+	var world_pos: Vector3 = voxel_to_world(x, y, z)
+	var distance_from_center: float = world_pos.length()
+
+	# Normalize position for noise sampling
+	var nx: float = world_pos.x / planet_radius
+	var ny: float = world_pos.y / planet_radius
+	var nz: float = world_pos.z / planet_radius
+
+	# Base spherical shape
+	var base_radius: float = planet_radius * BASE_RADIUS_MULTIPLIER
+	var density: float = base_radius - distance_from_center
+
+	# Multi-octave continent noise
+	var continent_noise: float = (
+		_terrain_noise.noise(nx * CONTINENT_SCALE, ny * CONTINENT_SCALE, nz * CONTINENT_SCALE) * 0.5 +
+		_terrain_noise.noise(nx * CONTINENT_SCALE * 2.0, ny * CONTINENT_SCALE * 2.0, nz * CONTINENT_SCALE * 2.0) * 0.25 +
+		_terrain_noise.noise(nx * CONTINENT_SCALE * 4.0, ny * CONTINENT_SCALE * 4.0, nz * CONTINENT_SCALE * 4.0) * 0.125
+	)
+
+	# Mountain noise
+	var mountain_noise_val: float = (
+		_mountain_noise.noise(nx * MOUNTAIN_SCALE, ny * MOUNTAIN_SCALE, nz * MOUNTAIN_SCALE) * 0.6 +
+		_mountain_noise.noise(nx * MOUNTAIN_SCALE * 2.0, ny * MOUNTAIN_SCALE * 2.0, nz * MOUNTAIN_SCALE * 2.0) * 0.3
+	)
+
+	# Apply terrain features
+	var mountain_factor: float = maxf(0.0, continent_noise) * 1.5
+	density += continent_noise * planet_radius * continent_strength
+	density += mountain_noise_val * mountain_factor * planet_radius * mountain_strength
+
+	# Cave generation
+	_apply_caves(nx, ny, nz, density)
+
+	# River valleys
+	_apply_rivers(nx, ny, nz, continent_noise, density)
+
+	set_voxel(x, y, z, density)
+
+func _apply_caves(nx: float, ny: float, nz: float, density: float) -> float:
+	var cave_noise1: float = _cave_noise.noise(nx * CAVE_SCALE, ny * CAVE_SCALE, nz * CAVE_SCALE)
+	var cave_noise2: float = _cave_noise.noise(nx * CAVE_SCALE + 100.0, ny * CAVE_SCALE + 100.0, nz * CAVE_SCALE + 100.0)
+
+	if abs(cave_noise1) < cave_threshold and abs(cave_noise2) < cave_threshold:
+		density -= planet_radius * 0.3
+
+	return density
+
+func _apply_rivers(nx: float, ny: float, nz: float, continent_noise: float, density: float) -> float:
+	var river_noise_val: float = _river_noise.noise(nx * RIVER_SCALE, ny * RIVER_SCALE, nz * RIVER_SCALE)
+
+	if continent_noise > -0.1 and continent_noise < 0.3 and abs(river_noise_val) < river_threshold:
+		density -= planet_radius * 0.08
+
+	return density
+
+func _add_water_layer() -> void:
+	var water_radius: float = planet_radius * (BASE_RADIUS_MULTIPLIER + water_level)
+
+	for x in range(voxel_resolution):
+		for y in range(voxel_resolution):
+			for z in range(voxel_resolution):
+				var world_pos: Vector3 = voxel_to_world(x, y, z)
+				var distance_from_center: float = world_pos.length()
+				var current_density: float = get_voxel(x, y, z)
+
+				if distance_from_center < water_radius and current_density < 0.0:
+					set_voxel(x, y, z, WATER_DENSITY_MARKER)
+
+func _on_generation_complete() -> void:
+	if _generation_thread:
+		_generation_thread.wait_to_finish()
+		_generation_thread = null
+
+	print("Terrain generated, creating meshes...")
+	_update_meshes()
+	_is_generating = false
+	terrain_generation_completed.emit()
+	print("Complete!")
+#endregion
+
+#region Mesh Generation
+func _update_meshes_deferred() -> void:
+	_update_meshes()
+
+func _update_meshes() -> void:
+	mesh_update_started.emit()
+
+	var terrain_data: Dictionary = _generate_terrain_mesh()
+	var water_data: Dictionary = _generate_water_mesh()
+
+	# Update terrain mesh
+	if terrain_data.vertices.size() > 0:
+		var terrain_mesh: ArrayMesh = _create_mesh_from_data(terrain_data.vertices, terrain_data.colors)
+		_terrain_mesh_instance.mesh = terrain_mesh
+
+	# Update water mesh
+	if water_data.vertices.size() > 0:
+		var water_mesh: ArrayMesh = _create_mesh_from_data(water_data.vertices, water_data.colors)
+		_water_mesh_instance.mesh = water_mesh
+
+	var terrain_tris: int = terrain_data.vertices.size() / 3
+	var water_tris: int = water_data.vertices.size() / 3
+	mesh_update_completed.emit(terrain_tris, water_tris)
+
+func _generate_terrain_mesh() -> Dictionary:
+	var vertices: PackedVector3Array = []
+	var colors: PackedColorArray = []
+	const ISOLEVEL: float = 0.0
+
+	for x in range(voxel_resolution - 1):
+		for y in range(voxel_resolution - 1):
+			for z in range(voxel_resolution - 1):
+				var cube_data: Dictionary = _get_cube_data(x, y, z)
+				var triangles: Array[Vector3] = _marching_cubes.polygonise(
+					cube_data.points,
+					cube_data.values,
+					ISOLEVEL
+				)
+
+				for vert in triangles:
+					vertices.append(vert)
+					colors.append(_get_terrain_color(vert, cube_data.values))
+
+	return {"vertices": vertices, "colors": colors}
+
+func _generate_water_mesh() -> Dictionary:
+	var vertices: PackedVector3Array = []
+	var colors: PackedColorArray = []
+	const ISOLEVEL: float = -5.0
+	const WATER_COLOR: Color = Color(0.0, 0.4, 0.9, 0.7)
+
+	for x in range(voxel_resolution - 1):
+		for y in range(voxel_resolution - 1):
+			for z in range(voxel_resolution - 1):
+				var cube_data: Dictionary = _get_cube_data_clamped(x, y, z)
+
+				if not _has_water(cube_data.values):
+					continue
+
+				var triangles: Array[Vector3] = _marching_cubes.polygonise(
+					cube_data.points,
+					cube_data.values,
+					ISOLEVEL
+				)
+
+				for vert in triangles:
+					vertices.append(vert)
+					colors.append(WATER_COLOR)
+
+	return {"vertices": vertices, "colors": colors}
+
+func _get_cube_data(x: int, y: int, z: int) -> Dictionary:
+	var points: Array[Vector3] = [
+		voxel_to_world(x, y, z),
+		voxel_to_world(x + 1, y, z),
+		voxel_to_world(x + 1, y, z + 1),
+		voxel_to_world(x, y, z + 1),
+		voxel_to_world(x, y + 1, z),
+		voxel_to_world(x + 1, y + 1, z),
+		voxel_to_world(x + 1, y + 1, z + 1),
+		voxel_to_world(x, y + 1, z + 1)
+	]
+
+	var values: Array[float] = [
+		get_voxel(x, y, z),
+		get_voxel(x + 1, y, z),
+		get_voxel(x + 1, y, z + 1),
+		get_voxel(x, y, z + 1),
+		get_voxel(x, y + 1, z),
+		get_voxel(x + 1, y + 1, z),
+		get_voxel(x + 1, y + 1, z + 1),
+		get_voxel(x, y + 1, z + 1)
+	]
+
+	return {"points": points, "values": values}
+
+func _get_cube_data_clamped(x: int, y: int, z: int) -> Dictionary:
+	var data: Dictionary = _get_cube_data(x, y, z)
+	for i in range(data.values.size()):
+		data.values[i] = maxf(-20.0, data.values[i])
+	return data
+
+func _has_water(values: Array[float]) -> bool:
+	for val in values:
+		if val < 0.0:
+			return true
+	return false
+
+func _get_terrain_color(vert: Vector3, cube_values: Array[float]) -> Color:
+	var height: float = vert.length()
+	var normalized_height: float = (height - planet_radius * 0.7) / (planet_radius * 0.3)
+
+	# Check if water
+	for val in cube_values:
+		if val < 0.0 and val > -50.0:
+			return Color(0.1, 0.3, 0.8)
+
+	# Height-based coloring
+	if normalized_height > 0.7:
+		return Color(0.95, 0.95, 1.0)  # Snow
+	elif normalized_height > 0.5:
+		return Color(0.5, 0.5, 0.5)  # Rocky mountains
+	elif normalized_height > 0.2:
+		return Color(0.2, 0.6, 0.2)  # Grass
+	elif normalized_height > 0.0:
+		return Color(0.76, 0.7, 0.5)  # Beach/dirt
+	else:
+		return Color(0.3, 0.4, 0.3)  # Ocean floor
+
+func _create_mesh_from_data(vertices: PackedVector3Array, colors: PackedColorArray) -> ArrayMesh:
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_COLOR] = colors
+
+	var mesh: ArrayMesh = ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+
+	# Generate normals
+	var st: SurfaceTool = SurfaceTool.new()
+	st.create_from(mesh, 0)
+	st.generate_normals()
+	return st.commit()
+#endregion
