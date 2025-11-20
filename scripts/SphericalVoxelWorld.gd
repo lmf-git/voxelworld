@@ -6,7 +6,7 @@ extends Node3D
 
 #region Signals
 signal terrain_generation_started()
-signal terrain_generation_progress(progress: float) # Used via call_deferred for thread safety
+signal terrain_generation_progress(progress: float) # Emitted via call_deferred in _generate_terrain_data() for thread safety
 signal terrain_generation_completed()
 signal terrain_modified(position: Vector3i, radius: int, added: bool)
 signal mesh_update_started()
@@ -36,11 +36,14 @@ signal mesh_update_completed(terrain_triangles: int, water_triangles: int)
 @export_group("Performance")
 @export var use_threading: bool = true
 @export var generate_on_ready: bool = true
+@export_range(100.0, 1000.0, 10.0) var chunk_view_distance: float = 400.0
 #endregion
 
 #region Private Variables
 var _voxel_size: float
-var _voxels: PackedFloat32Array
+var _chunks: Array[VoxelChunk] = []
+var _chunk_size: int = 32
+var _chunks_per_axis: int = 0
 var _marching_cubes: MarchingCubes
 var _terrain_noise: SimplexNoise3D
 var _cave_noise: SimplexNoise3D
@@ -54,6 +57,7 @@ var _water_material: StandardMaterial3D
 
 var _is_generating: bool = false
 var _generation_thread: Thread
+var _camera: Camera3D  ## Reference to camera for LOD updates
 #endregion
 
 #region Constants
@@ -72,6 +76,11 @@ func _ready() -> void:
 	if generate_on_ready:
 		generate_terrain()
 
+func _process(_delta: float) -> void:
+	# Update chunk LOD levels based on camera distance
+	if _camera and not _is_generating:
+		_update_chunk_lods()
+
 func _exit_tree() -> void:
 	_cleanup()
 #endregion
@@ -80,11 +89,12 @@ func _exit_tree() -> void:
 func _initialize() -> void:
 	_voxel_size = (planet_radius * 2.0) / float(voxel_resolution)
 
-	# Initialize voxel array
-	_voxels = PackedFloat32Array()
-	var total_voxels: int = voxel_resolution * voxel_resolution * voxel_resolution
-	_voxels.resize(total_voxels)
-	_voxels.fill(0.0)
+	# Calculate chunk grid dimensions
+	_chunks_per_axis = ceili(float(voxel_resolution) / float(_chunk_size))
+	print("Chunk grid: ", _chunks_per_axis, "x", _chunks_per_axis, "x", _chunks_per_axis, " (", _chunks_per_axis * _chunks_per_axis * _chunks_per_axis, " total chunks)")
+
+	# Initialize chunks
+	_create_chunks()
 
 	# Initialize noise generators
 	_terrain_noise = SimplexNoise3D.new(terrain_seed)
@@ -98,16 +108,58 @@ func _initialize() -> void:
 	# Create materials
 	_create_materials()
 
-	# Create mesh instances
+	# Create mesh instances (kept for compatibility, but will be replaced by chunk meshes)
 	_terrain_mesh_instance = MeshInstance3D.new()
 	_terrain_mesh_instance.name = "TerrainMesh"
 	_terrain_mesh_instance.material_override = _terrain_material
 	add_child(_terrain_mesh_instance)
+	_terrain_mesh_instance.visible = false  # Hidden - chunks render instead
 
 	_water_mesh_instance = MeshInstance3D.new()
 	_water_mesh_instance.name = "WaterMesh"
 	_water_mesh_instance.material_override = _water_material
 	add_child(_water_mesh_instance)
+	_water_mesh_instance.visible = false  # Hidden
+
+	# Find camera for LOD updates
+	_find_camera()
+
+func _create_chunks() -> void:
+	_chunks.clear()
+
+	for cx in range(_chunks_per_axis):
+		for cy in range(_chunks_per_axis):
+			for cz in range(_chunks_per_axis):
+				var chunk: VoxelChunk = VoxelChunk.new()
+				chunk.chunk_size = _chunk_size
+				chunk.name = "Chunk_%d_%d_%d" % [cx, cy, cz]
+
+				var chunk_pos: Vector3i = Vector3i(cx, cy, cz)
+				var voxel_offset: Vector3i = Vector3i(
+					cx * _chunk_size,
+					cy * _chunk_size,
+					cz * _chunk_size
+				)
+
+				chunk.initialize(chunk_pos, voxel_offset)
+
+				# Calculate chunk center in world space
+				var chunk_center_voxel: Vector3i = voxel_offset + Vector3i(_chunk_size / 2, _chunk_size / 2, _chunk_size / 2)
+				var chunk_center_world: Vector3 = voxel_to_world(chunk_center_voxel.x, chunk_center_voxel.y, chunk_center_voxel.z)
+				chunk.global_position = chunk_center_world
+
+				add_child(chunk)
+				_chunks.append(chunk)
+
+func _find_camera() -> void:
+	# Look for PlayerCamera child
+	for child in get_children():
+		if child is Camera3D:
+			_camera = child
+			print("Found camera for LOD updates: ", _camera.name)
+			return
+
+	print("Warning: No camera found for LOD updates")
 
 func _create_materials() -> void:
 	# Terrain material
@@ -129,7 +181,9 @@ func _cleanup() -> void:
 	if _generation_thread and _generation_thread.is_alive():
 		_generation_thread.wait_to_finish()
 
-	_voxels.clear()
+	for chunk in _chunks:
+		chunk.queue_free()
+	_chunks.clear()
 #endregion
 
 #region Public API
@@ -157,6 +211,7 @@ func modify_terrain(voxel_pos: Vector3i, radius: int, add_terrain: bool = false)
 		return
 
 	var modification_value: float = 10.0 if add_terrain else -10.0
+	var affected_chunks: Array[VoxelChunk] = []
 
 	for dx in range(-radius, radius + 1):
 		for dy in range(-radius, radius + 1):
@@ -170,8 +225,16 @@ func modify_terrain(voxel_pos: Vector3i, radius: int, add_terrain: bool = false)
 					var current_density: float = get_voxel(x, y, z)
 					set_voxel(x, y, z, current_density + modification_value)
 
+					# Track affected chunk
+					var chunk: VoxelChunk = _get_chunk_for_voxel(x, y, z)
+					if chunk and not affected_chunks.has(chunk):
+						affected_chunks.append(chunk)
+
+	# Regenerate meshes for affected chunks only
+	for chunk in affected_chunks:
+		chunk.generate_meshes(planet_radius, water_level, BASE_RADIUS_MULTIPLIER, voxel_resolution, _terrain_material)
+
 	terrain_modified.emit(voxel_pos, radius, add_terrain)
-	call_deferred("_update_meshes_deferred")
 
 func raycast_voxel(origin: Vector3, direction: Vector3, max_distance: float = 100.0) -> Dictionary:
 	var step: float = _voxel_size * 0.5
@@ -197,20 +260,52 @@ func raycast_voxel(origin: Vector3, direction: Vector3, max_distance: float = 10
 
 #region Voxel Access
 func get_voxel(x: int, y: int, z: int) -> float:
-	var idx: int = _get_voxel_index(x, y, z)
-	return _voxels[idx] if idx >= 0 else 0.0
-
-func set_voxel(x: int, y: int, z: int, value: float) -> void:
-	var idx: int = _get_voxel_index(x, y, z)
-	if idx >= 0:
-		_voxels[idx] = value
-
-func _get_voxel_index(x: int, y: int, z: int) -> int:
 	if x < 0 or x >= voxel_resolution or \
 	   y < 0 or y >= voxel_resolution or \
 	   z < 0 or z >= voxel_resolution:
-		return -1
-	return x + y * voxel_resolution + z * voxel_resolution * voxel_resolution
+		return 0.0
+
+	var chunk: VoxelChunk = _get_chunk_for_voxel(x, y, z)
+	if not chunk:
+		return 0.0
+
+	var local_x: int = x % _chunk_size
+	var local_y: int = y % _chunk_size
+	var local_z: int = z % _chunk_size
+
+	return chunk.get_voxel(local_x, local_y, local_z)
+
+func set_voxel(x: int, y: int, z: int, value: float) -> void:
+	if x < 0 or x >= voxel_resolution or \
+	   y < 0 or y >= voxel_resolution or \
+	   z < 0 or z >= voxel_resolution:
+		return
+
+	var chunk: VoxelChunk = _get_chunk_for_voxel(x, y, z)
+	if not chunk:
+		return
+
+	var local_x: int = x % _chunk_size
+	var local_y: int = y % _chunk_size
+	var local_z: int = z % _chunk_size
+
+	chunk.set_voxel(local_x, local_y, local_z, value)
+
+func _get_chunk_for_voxel(x: int, y: int, z: int) -> VoxelChunk:
+	var cx: int = x / _chunk_size
+	var cy: int = y / _chunk_size
+	var cz: int = z / _chunk_size
+
+	if cx < 0 or cx >= _chunks_per_axis or \
+	   cy < 0 or cy >= _chunks_per_axis or \
+	   cz < 0 or cz >= _chunks_per_axis:
+		return null
+
+	var chunk_index: int = cx + cy * _chunks_per_axis + cz * _chunks_per_axis * _chunks_per_axis
+	if chunk_index >= 0 and chunk_index < _chunks.size():
+		return _chunks[chunk_index]
+
+	return null
 #endregion
 
 #region Coordinate Conversion
@@ -280,17 +375,24 @@ func _generate_voxel_density(x: int, y: int, z: int) -> void:
 		_mountain_noise.noise(nx * MOUNTAIN_SCALE * 2.0, ny * MOUNTAIN_SCALE * 2.0, nz * MOUNTAIN_SCALE * 2.0) * 0.3
 	)
 
-	# Apply terrain features
-	var mountain_factor: float = maxf(0.0, continent_noise) * 1.5
-	density += continent_noise * planet_radius * continent_strength
-	density += mountain_noise_val * mountain_factor * planet_radius * mountain_strength
+	# Only apply terrain features if we're near the surface
+	# This prevents creating disconnected floating geometry deep underground
+	var depth_into_terrain: float = density
+	var is_near_surface: bool = depth_into_terrain < planet_radius * 0.4
+
+	if is_near_surface:
+		# Apply terrain features
+		var mountain_factor: float = maxf(0.0, continent_noise) * 1.5
+		density += continent_noise * planet_radius * continent_strength
+		density += mountain_noise_val * mountain_factor * planet_radius * mountain_strength
+
+		# River valleys (only on land areas, not underwater)
+		if continent_noise > -0.05:  # More restrictive - only above-water areas
+			density = _apply_rivers(nx, ny, nz, continent_noise, density)
 
 	# Cave generation (optional - disabled by default to prevent floating geometry)
 	if enable_caves:
 		density = _apply_caves(nx, ny, nz, density)
-
-	# River valleys
-	density = _apply_rivers(nx, ny, nz, continent_noise, density)
 
 	set_voxel(x, y, z, density)
 
@@ -396,158 +498,40 @@ func _update_meshes_deferred() -> void:
 func _update_meshes() -> void:
 	mesh_update_started.emit()
 
-	var terrain_data: Dictionary = _generate_terrain_mesh()
+	var total_triangles: int = 0
 
-	# Update terrain mesh (includes water-colored areas)
-	if terrain_data.vertices.size() > 0:
-		var terrain_mesh: ArrayMesh = _create_mesh_from_data(terrain_data.vertices, terrain_data.colors)
-		_terrain_mesh_instance.mesh = terrain_mesh
+	# Generate meshes for all chunks
+	for chunk in _chunks:
+		chunk.generate_meshes(planet_radius, water_level, BASE_RADIUS_MULTIPLIER, voxel_resolution, _terrain_material)
 
-	# Hide water mesh (not used - water is shown via terrain vertex colors)
-	_water_mesh_instance.mesh = null
+		# Count triangles (approximate - LOD 0 mesh only)
+		if chunk._mesh_instance.mesh:
+			var mesh: ArrayMesh = chunk._mesh_instance.mesh as ArrayMesh
+			if mesh and mesh.get_surface_count() > 0:
+				var arrays: Array = mesh.surface_get_arrays(0)
+				if arrays[Mesh.ARRAY_VERTEX]:
+					total_triangles += arrays[Mesh.ARRAY_VERTEX].size() / 3
 
-	var terrain_tris: int = terrain_data.vertices.size() / 3
-	mesh_update_completed.emit(terrain_tris, 0)
+	mesh_update_completed.emit(total_triangles, 0)
+	print("  Total triangles across all chunks: ", total_triangles)
+#endregion
 
-func _generate_terrain_mesh() -> Dictionary:
-	var vertices: PackedVector3Array = []
-	var colors: PackedColorArray = []
-	const ISOLEVEL: float = 0.0
+#region LOD Management
+func _update_chunk_lods() -> void:
+	if not _camera:
+		return
 
-	for x in range(voxel_resolution - 1):
-		for y in range(voxel_resolution - 1):
-			for z in range(voxel_resolution - 1):
-				var cube_data: Dictionary = _get_cube_data(x, y, z)
-				var triangles: Array[Vector3] = _marching_cubes.polygonise(
-					cube_data.points,
-					cube_data.values,
-					ISOLEVEL
-				)
+	var camera_pos: Vector3 = _camera.global_position
 
-				for vert in triangles:
-					vertices.append(vert)
-					colors.append(_get_terrain_color(vert, cube_data.values))
+	for chunk in _chunks:
+		var chunk_center: Vector3 = chunk.global_position
+		var distance: float = camera_pos.distance_to(chunk_center)
 
-	return {"vertices": vertices, "colors": colors}
-
-func _generate_water_mesh() -> Dictionary:
-	var vertices: PackedVector3Array = []
-	var colors: PackedColorArray = []
-	const ISOLEVEL: float = -5.0
-	const WATER_COLOR: Color = Color(0.0, 0.4, 0.9, 0.7)
-
-	for x in range(voxel_resolution - 1):
-		for y in range(voxel_resolution - 1):
-			for z in range(voxel_resolution - 1):
-				var cube_data: Dictionary = _get_cube_data_clamped(x, y, z)
-
-				if not _has_water(cube_data.values):
-					continue
-
-				var triangles: Array[Vector3] = _marching_cubes.polygonise(
-					cube_data.points,
-					cube_data.values,
-					ISOLEVEL
-				)
-
-				for vert in triangles:
-					vertices.append(vert)
-					colors.append(WATER_COLOR)
-
-	return {"vertices": vertices, "colors": colors}
-
-func _get_cube_data(x: int, y: int, z: int) -> Dictionary:
-	var points: Array[Vector3] = [
-		voxel_to_world(x, y, z),
-		voxel_to_world(x + 1, y, z),
-		voxel_to_world(x + 1, y, z + 1),
-		voxel_to_world(x, y, z + 1),
-		voxel_to_world(x, y + 1, z),
-		voxel_to_world(x + 1, y + 1, z),
-		voxel_to_world(x + 1, y + 1, z + 1),
-		voxel_to_world(x, y + 1, z + 1)
-	]
-
-	var values: Array[float] = [
-		get_voxel(x, y, z),
-		get_voxel(x + 1, y, z),
-		get_voxel(x + 1, y, z + 1),
-		get_voxel(x, y, z + 1),
-		get_voxel(x, y + 1, z),
-		get_voxel(x + 1, y + 1, z),
-		get_voxel(x + 1, y + 1, z + 1),
-		get_voxel(x, y + 1, z + 1)
-	]
-
-	return {"points": points, "values": values}
-
-func _get_cube_data_clamped(x: int, y: int, z: int) -> Dictionary:
-	var data: Dictionary = _get_cube_data(x, y, z)
-	for i in range(data.values.size()):
-		data.values[i] = maxf(-20.0, data.values[i])
-	return data
-
-func _has_water(values: Array[float]) -> bool:
-	for val in values:
-		if val < 0.0:
-			return true
-	return false
-
-## Generate terrain color based on height above water level (biomes)
-## Returns appropriate color for snow, mountains, grass, beaches, etc.
-func _get_terrain_color(vert: Vector3, _cube_values: Array[float]) -> Color:
-	var height: float = vert.length()
-	var water_radius: float = planet_radius * (BASE_RADIUS_MULTIPLIER + water_level)
-
-	# Normalize height relative to water level
-	var height_above_water: float = (height - water_radius) / (planet_radius * 0.15)
-
-	# Check if this is underwater (based on height, not density)
-	# Water level is at water_radius
-	if height < water_radius:
-		# Below water - show underwater colors
-		var depth: float = (water_radius - height) / (planet_radius * 0.05)
-		if depth > 0.5:
-			return Color(0.05, 0.1, 0.3)  # Deep water - dark blue
+		# Visibility culling based on distance
+		if distance > chunk_view_distance:
+			chunk.set_chunk_visible(false)
 		else:
-			return Color(0.1, 0.3, 0.6)  # Shallow water - medium blue
-
-	# Above water - show terrain biomes based on height
-	if height_above_water > 0.8:
-		# High peaks - Snow
-		return Color(0.95, 0.95, 1.0)
-	elif height_above_water > 0.5:
-		# Mountains - Rocky gray with some variation
-		var rock_variation: float = sin(vert.x * 10.0 + vert.y * 10.0) * 0.1
-		return Color(0.5 + rock_variation, 0.5 + rock_variation, 0.5 + rock_variation)
-	elif height_above_water > 0.3:
-		# Hills - Dark green grass
-		return Color(0.2, 0.5, 0.2)
-	elif height_above_water > 0.1:
-		# Lowlands - Bright green grass
-		return Color(0.3, 0.7, 0.3)
-	elif height_above_water > -0.05:
-		# Beach/sand
-		return Color(0.85, 0.8, 0.6)
-	elif height_above_water > -0.15:
-		# Shallow water / mud
-		return Color(0.6, 0.55, 0.4)
-	else:
-		# Ocean floor / deep areas
-		return Color(0.3, 0.4, 0.3)
-
-func _create_mesh_from_data(vertices: PackedVector3Array, colors: PackedColorArray) -> ArrayMesh:
-	var arrays: Array = []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_COLOR] = colors
-
-	var mesh: ArrayMesh = ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-
-	# Generate normals
-	var st: SurfaceTool = SurfaceTool.new()
-	st.create_from(mesh, 0)
-	st.generate_normals()
-	return st.commit()
+			chunk.set_chunk_visible(true)
+			# Only update LOD for visible chunks
+			chunk.update_lod_for_distance(camera_pos)
 #endregion

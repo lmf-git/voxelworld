@@ -84,21 +84,31 @@ The terrain uses multiple layers of 3D simplex noise:
 - **Planet Radius**: 50 units
 - **Dynamic Density Field**: Signed distance field with marching cubes surface extraction
 - **Water Representation**: Negative density values for water voxels
-- **LOD**: Not currently implemented - see [LOD_IMPLEMENTATION.md](LOD_IMPLEMENTATION.md) for details
+- **Chunk-Based System**: World divided into 32³ voxel chunks for efficient management
+- **LOD System**: 3 levels of detail (full, half, quarter resolution) based on camera distance
+- **View Distance Culling**: Distant chunks hidden for better performance
 
 ### Performance
-- Generates approximately **100,000-300,000 triangles** at 96³ resolution
+- Generates approximately **100,000-300,000 triangles** at 96³ resolution (per LOD level)
+- **Chunk-Based LOD**: Automatically reduces detail for distant chunks (3 LOD levels)
+- **View Distance Culling**: Chunks beyond view distance are hidden
 - **Threaded terrain generation** keeps UI responsive
-- Mesh generation occurs on-demand when terrain is modified
+- **Per-Chunk mesh updates**: Only affected chunks regenerate on terrain modification
 - **Static typing** provides 20-40% performance improvement
 - **Packed arrays** for efficient vertex data storage
 - Generation time: 5-15 seconds (depending on resolution and CPU)
 
+**LOD Performance Benefits:**
+- Close chunks: Full detail (stride 1)
+- Medium distance (50-150 units): Half detail (stride 2) - 75% fewer triangles
+- Far distance (150-300 units): Quarter detail (stride 4) - 93% fewer triangles
+- Beyond view distance (400+ units): Hidden completely
+
 **Resolution Impact:**
 - 64³: ~50k-150k triangles, 2-5 sec generation, 60 FPS
 - 96³: ~100k-300k triangles, 5-15 sec generation, 45-60 FPS ⭐ **Recommended**
-- 128³: ~200k-600k triangles, 15-30 sec generation, 30-45 FPS
-- 192³+: 500k+ triangles, 45+ sec generation, <30 FPS (needs LOD)
+- 128³: ~200k-600k triangles, 15-30 sec generation, 40-60 FPS (LOD helps significantly)
+- 192³+: 500k+ triangles, 45+ sec generation, 30-60 FPS (LOD makes it playable)
 
 ## Customization
 
@@ -142,6 +152,10 @@ The terrain automatically applies height-based biomes:
 **Performance:**
 - **use_threading**: Enable threaded generation (default: true)
 - **generate_on_ready**: Auto-generate on load (default: true)
+- **chunk_view_distance**: Maximum distance to render chunks (100-1000, default: 400.0)
+  - 200: Close view, best FPS
+  - 400: **Recommended** - good balance
+  - 600+: Far view, lower FPS
 
 ### PlayerCamera Node
 
@@ -174,17 +188,22 @@ See [GODOT_BEST_PRACTICES.md](GODOT_BEST_PRACTICES.md) for detailed explanations
 
 ## Known Limitations
 
-- **Memory Usage**: 96³ uses ~3.5MB voxel data, 128³ uses ~8MB, 256³ uses ~64MB
-- **No LOD**: All voxels rendered at full resolution - see [LOD_IMPLEMENTATION.md](LOD_IMPLEMENTATION.md)
-- **No Chunking**: Entire planet is one mesh (limits max resolution without LOD)
+- **Memory Usage**: 96³ uses ~3.5MB voxel data (distributed across chunks), 128³ uses ~8MB, 256³ uses ~64MB
 - **Caves Disabled**: Cave generation can create floating geometry artifacts (enable at your own risk)
+- **LOD Transitions**: No smooth blending between LOD levels (instant switching)
+
+## Recent Improvements
+
+✅ **LOD System Implemented**: 3-level distance-based detail reduction (full/half/quarter)
+✅ **Chunk-Based Architecture**: World divided into 32³ voxel chunks for efficient management
+✅ **View Distance Culling**: Distant chunks automatically hidden
+✅ **Per-Chunk Mesh Updates**: Only affected chunks regenerate on terrain modification
 
 ## Future Enhancements
 
 **High Priority:**
-- **LOD System**: Distance-based detail levels (see [LOD_IMPLEMENTATION.md](LOD_IMPLEMENTATION.md))
-- **Chunk System**: Split world into manageable pieces
 - **Fix Cave Artifacts**: Better algorithm for underground caves without surface gaps
+- **Smooth LOD Transitions**: Geomorphing between LOD levels to prevent popping
 
 **Medium Priority:**
 - Multithreaded mesh generation (currently only terrain gen is threaded)
