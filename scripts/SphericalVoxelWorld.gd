@@ -26,11 +26,11 @@ signal mesh_update_completed(terrain_triangles: int, water_triangles: int)
 @export var river_seed: int = 22222
 
 @export_group("Terrain Parameters")
-@export_range(0.0, 2.0, 0.01) var continent_strength: float = 0.35
-@export_range(0.0, 2.0, 0.01) var mountain_strength: float = 0.45
+@export_range(0.0, 0.5, 0.01) var continent_strength: float = 0.15
+@export_range(0.0, 0.5, 0.01) var mountain_strength: float = 0.25
 @export_range(0.0, 1.0, 0.01) var cave_threshold: float = 0.15
 @export_range(0.0, 0.5, 0.01) var cave_min_depth: float = 0.25
-@export_range(0.0, 1.0, 0.01) var river_threshold: float = 0.1
+@export_range(0.0, 0.2, 0.01) var river_threshold: float = 0.08
 @export var enable_caves: bool = false
 
 @export_group("Performance")
@@ -349,49 +349,68 @@ func _generate_terrain_data() -> void:
 
 	_add_water_layer()
 
+## Generates voxel density using radial height-based approach
+## This method ensures coherent terrain by:
+## 1. Starting with a solid spherical base
+## 2. Adding large-scale continent/ocean heights (smooth features)
+## 3. Adding mountains only on elevated continents (prevents underwater mountains)
+## 4. Adding small detail variation for texture
+## 5. Carving rivers only on elevated land
+## 6. Converting final surface radius to density field
+## This approach eliminates floating geometry and creates natural-looking planets
 func _generate_voxel_density(x: int, y: int, z: int) -> void:
 	var world_pos: Vector3 = voxel_to_world(x, y, z)
 	var distance_from_center: float = world_pos.length()
 
-	# Normalize position for noise sampling
-	var nx: float = world_pos.x / planet_radius
-	var ny: float = world_pos.y / planet_radius
-	var nz: float = world_pos.z / planet_radius
+	# Normalize position for noise sampling (on unit sphere)
+	var normalized_pos: Vector3 = world_pos.normalized()
+	var nx: float = normalized_pos.x
+	var ny: float = normalized_pos.y
+	var nz: float = normalized_pos.z
 
-	# Base spherical shape
-	var base_radius: float = planet_radius * BASE_RADIUS_MULTIPLIER
-	var density: float = base_radius - distance_from_center
+	# 1. BASE SPHERE - Start with solid planet core
+	var base_surface_radius: float = planet_radius * BASE_RADIUS_MULTIPLIER
 
-	# Multi-octave continent noise
-	var continent_noise: float = (
-		_terrain_noise.noise(nx * CONTINENT_SCALE, ny * CONTINENT_SCALE, nz * CONTINENT_SCALE) * 0.5 +
-		_terrain_noise.noise(nx * CONTINENT_SCALE * 2.0, ny * CONTINENT_SCALE * 2.0, nz * CONTINENT_SCALE * 2.0) * 0.25 +
-		_terrain_noise.noise(nx * CONTINENT_SCALE * 4.0, ny * CONTINENT_SCALE * 4.0, nz * CONTINENT_SCALE * 4.0) * 0.125
-	)
+	# 2. LARGE-SCALE CONTINENT/OCEAN HEIGHTS (very smooth, big features)
+	var continent_height: float = (
+		_terrain_noise.noise(nx * CONTINENT_SCALE, ny * CONTINENT_SCALE, nz * CONTINENT_SCALE) * 0.6 +
+		_terrain_noise.noise(nx * CONTINENT_SCALE * 1.7, ny * CONTINENT_SCALE * 1.7, nz * CONTINENT_SCALE * 1.7) * 0.3 +
+		_terrain_noise.noise(nx * CONTINENT_SCALE * 2.5, ny * CONTINENT_SCALE * 2.5, nz * CONTINENT_SCALE * 2.5) * 0.1
+	) * planet_radius * continent_strength
 
-	# Mountain noise
-	var mountain_noise_val: float = (
-		_mountain_noise.noise(nx * MOUNTAIN_SCALE, ny * MOUNTAIN_SCALE, nz * MOUNTAIN_SCALE) * 0.6 +
-		_mountain_noise.noise(nx * MOUNTAIN_SCALE * 2.0, ny * MOUNTAIN_SCALE * 2.0, nz * MOUNTAIN_SCALE * 2.0) * 0.3
-	)
+	# 3. MEDIUM-SCALE MOUNTAINS (only on elevated continents)
+	var mountain_height: float = 0.0
+	if continent_height > 0.0:  # Only add mountains to land that's above base level
+		var mountain_noise: float = (
+			_mountain_noise.noise(nx * MOUNTAIN_SCALE, ny * MOUNTAIN_SCALE, nz * MOUNTAIN_SCALE) * 0.7 +
+			_mountain_noise.noise(nx * MOUNTAIN_SCALE * 2.2, ny * MOUNTAIN_SCALE * 2.2, nz * MOUNTAIN_SCALE * 2.2) * 0.3
+		)
+		# Mountains appear more on higher continents
+		var mountain_factor: float = (continent_height / (planet_radius * continent_strength)) * 0.8
+		mountain_height = maxf(0.0, mountain_noise) * mountain_factor * planet_radius * mountain_strength
 
-	# Only apply terrain features if we're near the surface
-	# This prevents creating disconnected floating geometry deep underground
-	var depth_into_terrain: float = density
-	var is_near_surface: bool = depth_into_terrain < planet_radius * 0.4
+	# 4. SMALL-SCALE DETAIL (subtle terrain variation)
+	var detail_height: float = _terrain_noise.noise(
+		nx * MOUNTAIN_SCALE * 3.5,
+		ny * MOUNTAIN_SCALE * 3.5,
+		nz * MOUNTAIN_SCALE * 3.5
+	) * planet_radius * 0.01
 
-	if is_near_surface:
-		# Apply terrain features
-		var mountain_factor: float = maxf(0.0, continent_noise) * 1.5
-		density += continent_noise * planet_radius * continent_strength
-		density += mountain_noise_val * mountain_factor * planet_radius * mountain_strength
+	# 5. CALCULATE FINAL SURFACE RADIUS with all height modifications
+	var final_surface_radius: float = base_surface_radius + continent_height + mountain_height + detail_height
 
-		# River valleys (only on land areas, not underwater)
-		if continent_noise > -0.05:  # More restrictive - only above-water areas
-			density = _apply_rivers(nx, ny, nz, continent_noise, density)
+	# 6. RIVER VALLEYS (carve into elevated land)
+	if continent_height > planet_radius * continent_strength * 0.1:  # Only rivers on higher land
+		var river_noise: float = _river_noise.noise(nx * RIVER_SCALE, ny * RIVER_SCALE, nz * RIVER_SCALE)
+		if abs(river_noise) < river_threshold:
+			var river_depth: float = (river_threshold - abs(river_noise)) / river_threshold
+			final_surface_radius -= river_depth * planet_radius * 0.06
 
-	# Cave generation (optional - disabled by default to prevent floating geometry)
-	if enable_caves:
+	# 7. CONVERT TO DENSITY: positive inside planet, negative outside
+	var density: float = final_surface_radius - distance_from_center
+
+	# 8. CAVES (optional - only deep underground to avoid surface artifacts)
+	if enable_caves and density > planet_radius * cave_min_depth:
 		density = _apply_caves(nx, ny, nz, density)
 
 	set_voxel(x, y, z, density)
@@ -411,14 +430,6 @@ func _apply_caves(nx: float, ny: float, nz: float, density: float) -> float:
 	# Create caves where both noise values are within a threshold
 	if abs(cave_noise1) < cave_threshold and abs(cave_noise2) < cave_threshold:
 		density -= planet_radius * 0.3
-
-	return density
-
-func _apply_rivers(nx: float, ny: float, nz: float, continent_noise: float, density: float) -> float:
-	var river_noise_val: float = _river_noise.noise(nx * RIVER_SCALE, ny * RIVER_SCALE, nz * RIVER_SCALE)
-
-	if continent_noise > -0.1 and continent_noise < 0.3 and abs(river_noise_val) < river_threshold:
-		density -= planet_radius * 0.08
 
 	return density
 

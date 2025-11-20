@@ -72,12 +72,24 @@ voxelworld/
 - **MarchingCubes**: Mesh generation algorithm for voxel visualization
 - **PlayerCamera**: First-person controller with terrain interaction
 
-### Terrain Generation
-The terrain uses multiple layers of 3D simplex noise:
-1. **Continental Noise**: Base landmass formation (3 octaves)
-2. **Mountain Noise**: High-frequency detail for peaks and valleys (2 octaves)
-3. **Cave Noise**: Dual-threshold noise for organic cave systems
-4. **River Noise**: Flow patterns for river valley carving
+### Terrain Generation - Radial Height-Based Approach
+
+**NEW: Smart terrain generation that eliminates floating geometry!**
+
+The system uses a **radial distance-based strategy** that ensures coherent, natural-looking planets:
+
+1. **Base Sphere**: Starts with solid spherical planet core
+2. **Continent Heights**: Large-scale smooth elevation (3 octaves) → continents and ocean basins
+3. **Mountain Heights**: Medium-scale peaks **only on elevated continents** (2 octaves) → prevents underwater mountains
+4. **Detail Layer**: Small-scale texture for surface realism
+5. **River Valleys**: Carved into elevated land only → natural drainage patterns
+6. **Surface → Density**: Final radius converted to density field for marching cubes
+
+**Four Independent Noise Generators:**
+1. **Continental Noise**: Base landmass formation (3 octaves, smooth)
+2. **Mountain Noise**: Peaks and valleys (2 octaves, conditional on elevation)
+3. **Cave Noise**: Organic cave systems (deep underground only)
+4. **River Noise**: Valley carving (elevated land only)
 
 ### Voxel System
 - **Resolution**: 96³ voxels by default (configurable 16-256)
@@ -132,12 +144,15 @@ All parameters are organized in the Inspector with clear groups:
 - **river_seed**: Seed for river noise (default: 22222)
 
 **Terrain Parameters:**
-- **continent_strength**: Landmass height (0-2, default: 0.35)
-- **mountain_strength**: Peak height (0-2, default: 0.45)
+- **continent_strength**: Landmass height variation (0-0.5, default: 0.15)
+  - Lower = flatter oceans/continents, Higher = more dramatic elevation changes
+- **mountain_strength**: Peak height on continents (0-0.5, default: 0.25)
+  - Only affects elevated land, prevents underwater mountains
 - **cave_threshold**: Cave density (0-1, default: 0.15)
 - **cave_min_depth**: Minimum depth for caves (0-0.5, default: 0.25)
-- **river_threshold**: River width (0-1, default: 0.1)
-- **enable_caves**: Enable cave generation (default: false) - **Warning**: Can cause floating geometry
+- **river_threshold**: River width (0-0.2, default: 0.08)
+  - Only carves into elevated land, creating natural drainage
+- **enable_caves**: Enable cave generation (default: false) - **Warning**: May cause artifacts
 
 **Biome System:**
 The terrain automatically applies height-based biomes:
