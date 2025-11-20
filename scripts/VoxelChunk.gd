@@ -104,12 +104,12 @@ func generate_meshes(planet_radius: float, water_level: float, base_radius_multi
 	_is_generated = true
 	chunk_generated.emit()
 
-func _generate_mesh_at_lod(lod_level: int, stride: int, planet_radius: float, water_level: float, base_radius_multiplier: float, voxel_resolution: int) -> ArrayMesh:
+func _generate_mesh_at_lod(_lod_level: int, stride: int, planet_radius: float, water_level: float, base_radius_multiplier: float, voxel_resolution: int) -> ArrayMesh:
 	var vertices: PackedVector3Array = []
 	var colors: PackedColorArray = []
 	var indices: PackedInt32Array = []
 
-	var effective_size: int = int(chunk_size / stride)
+	var _effective_size: int = int(chunk_size / stride)  # Calculated for documentation, not currently used
 
 	# Iterate through voxels with stride
 	for z in range(0, chunk_size - stride, stride):
@@ -265,9 +265,9 @@ func get_current_lod() -> int:
 #endregion
 
 #region Visibility Management
-func set_chunk_visible(visible: bool) -> void:
-	_is_visible = visible
-	_mesh_instance.visible = visible
+func set_chunk_visible(is_visible: bool) -> void:
+	_is_visible = is_visible
+	_mesh_instance.visible = is_visible
 
 func is_chunk_visible() -> bool:
 	return _is_visible
