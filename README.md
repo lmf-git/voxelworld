@@ -113,6 +113,7 @@ All parameters are organized in the Inspector with clear groups:
 - **continent_strength**: Landmass height (0-2, default: 0.35)
 - **mountain_strength**: Peak height (0-2, default: 0.45)
 - **cave_threshold**: Cave density (0-1, default: 0.15)
+- **cave_min_depth**: Minimum depth for caves (0-0.5, default: 0.1) - prevents surface gaps
 - **river_threshold**: River width (0-1, default: 0.1)
 
 **Biome System:**

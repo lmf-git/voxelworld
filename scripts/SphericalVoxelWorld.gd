@@ -29,6 +29,7 @@ signal mesh_update_completed(terrain_triangles: int, water_triangles: int)
 @export_range(0.0, 2.0, 0.01) var continent_strength: float = 0.35
 @export_range(0.0, 2.0, 0.01) var mountain_strength: float = 0.45
 @export_range(0.0, 1.0, 0.01) var cave_threshold: float = 0.15
+@export_range(0.0, 0.5, 0.01) var cave_min_depth: float = 0.1
 @export_range(0.0, 1.0, 0.01) var river_threshold: float = 0.1
 
 @export_group("Performance")
@@ -245,7 +246,7 @@ func _generate_terrain_data() -> void:
 				voxel_count += 1
 
 				# Emit progress every 5%
-				var progress_interval: int = maxi(1, total_voxels / 20)
+				var progress_interval: int = maxi(1, int(float(total_voxels) / 20.0))
 				if voxel_count % progress_interval == 0:
 					var progress: float = float(voxel_count) / float(total_voxels)
 					call_deferred("emit_signal", "terrain_generation_progress", progress)
@@ -292,9 +293,18 @@ func _generate_voxel_density(x: int, y: int, z: int) -> void:
 	set_voxel(x, y, z, density)
 
 func _apply_caves(nx: float, ny: float, nz: float, density: float) -> float:
+	# Only carve caves if we're significantly inside the terrain
+	# This prevents surface gaps and holes visible from outside
+	var depth_into_terrain: float = density
+	var min_depth: float = planet_radius * cave_min_depth
+
+	if depth_into_terrain < min_depth:
+		return density  # Too close to surface, no caves
+
 	var cave_noise1: float = _cave_noise.noise(nx * CAVE_SCALE, ny * CAVE_SCALE, nz * CAVE_SCALE)
 	var cave_noise2: float = _cave_noise.noise(nx * CAVE_SCALE + 100.0, ny * CAVE_SCALE + 100.0, nz * CAVE_SCALE + 100.0)
 
+	# Create caves where both noise values are within a threshold
 	if abs(cave_noise1) < cave_threshold and abs(cave_noise2) < cave_threshold:
 		density -= planet_radius * 0.3
 
@@ -483,9 +493,8 @@ func _has_water(values: Array[float]) -> bool:
 
 ## Generate terrain color based on height above water level (biomes)
 ## Returns appropriate color for snow, mountains, grass, beaches, etc.
-func _get_terrain_color(vert: Vector3, cube_values: Array[float]) -> Color:
+func _get_terrain_color(vert: Vector3, _cube_values: Array[float]) -> Color:
 	var height: float = vert.length()
-	var base_radius: float = planet_radius * BASE_RADIUS_MULTIPLIER
 	var water_radius: float = planet_radius * (BASE_RADIUS_MULTIPLIER + water_level)
 
 	# Normalize height relative to water level
