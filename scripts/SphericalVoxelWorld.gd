@@ -144,7 +144,8 @@ func _create_chunks() -> void:
 				chunk.initialize(chunk_pos, voxel_offset)
 
 				# Calculate chunk center in world space
-				var chunk_center_voxel: Vector3i = voxel_offset + Vector3i(_chunk_size // 2, _chunk_size // 2, _chunk_size // 2)
+				var half_chunk: int = _chunk_size / 2
+				var chunk_center_voxel: Vector3i = voxel_offset + Vector3i(half_chunk, half_chunk, half_chunk)
 				var chunk_center_world: Vector3 = voxel_to_world(chunk_center_voxel.x, chunk_center_voxel.y, chunk_center_voxel.z)
 				chunk.global_position = chunk_center_world
 
